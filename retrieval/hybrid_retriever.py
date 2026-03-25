@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import json
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import anthropic
 
 from config import settings
-from ingestion.embedder import get_single_embedding
+from ingestion.embedder import get_embeddings, get_single_embedding
 from retrieval import bm25_store, vector_store
 
 logger = logging.getLogger("norma-tecnica-ai")
@@ -20,17 +21,32 @@ def _expand_query(query: str) -> list[str]:
         client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
         response = client.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=300,
+            max_tokens=200,
             temperature=0,
-            system="Sei un ingegnere strutturista. Data una domanda, genera 3-5 sotto-query specifiche per cercare nelle NTC 2018 e nell'Eurocodice 2. Rispondi SOLO con le query, una per riga, senza numerazione o prefissi.",
+            system="Sei un ingegnere strutturista. Data una domanda, genera 3 sotto-query specifiche per cercare nelle NTC 2018 e nell'Eurocodice 2. Rispondi SOLO con le query, una per riga, senza numerazione o prefissi.",
             messages=[{"role": "user", "content": query}],
         )
-        sub_queries = [q.strip() for q in response.content[0].text.strip().split("\n") if q.strip()]
+        sub_queries = [q.strip() for q in response.content[0].text.strip().split("\n") if q.strip()][:3]
         logger.info(f"[MULTI-QUERY] Expanded into {len(sub_queries)} sub-queries")
         return sub_queries
     except Exception as e:
         logger.warning(f"[MULTI-QUERY] Failed: {e}")
         return []
+
+
+def _search_single_query(query_embedding, query_text, document_filter):
+    """Search vector + BM25 for a single query."""
+    vr = vector_store.search(
+        query_embedding=query_embedding,
+        top_k=settings.vector_top_k,
+        document_filter=document_filter,
+    )
+    br = bm25_store.search(
+        query=query_text,
+        top_k=settings.bm25_top_k,
+        document_filter=document_filter,
+    )
+    return vr, br
 
 
 def retrieve(
@@ -40,33 +56,31 @@ def retrieve(
 ) -> list[dict]:
     """Hybrid retrieval: vector + BM25 with RRF fusion + cross-ref expansion.
 
-    Uses multi-query expansion for broad/procedural questions.
+    Uses multi-query expansion and parallel search for speed.
     """
     top_k = top_k or settings.final_top_k
 
     # Expand query into sub-queries for better coverage
-    all_queries = [query] + _expand_query(query)
+    sub_queries = _expand_query(query)
+    all_queries = [query] + sub_queries
 
+    # Batch all embeddings in one API call (much faster than sequential)
+    all_embeddings = get_embeddings(all_queries)
+
+    # Search in parallel for all queries
     all_vector_results = []
     all_bm25_results = []
 
-    for q in all_queries:
-        # Vector search
-        query_embedding = get_single_embedding(q)
-        vr = vector_store.search(
-            query_embedding=query_embedding,
-            top_k=settings.vector_top_k,
-            document_filter=document_filter,
-        )
-        all_vector_results.extend(vr)
-
-        # BM25 search
-        br = bm25_store.search(
-            query=q,
-            top_k=settings.bm25_top_k,
-            document_filter=document_filter,
-        )
-        all_bm25_results.extend(br)
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = []
+        for i, q in enumerate(all_queries):
+            futures.append(executor.submit(
+                _search_single_query, all_embeddings[i], q, document_filter
+            ))
+        for future in as_completed(futures):
+            vr, br = future.result()
+            all_vector_results.extend(vr)
+            all_bm25_results.extend(br)
 
     # Reciprocal Rank Fusion across all results
     fused = _reciprocal_rank_fusion(all_vector_results, all_bm25_results, k=60)
