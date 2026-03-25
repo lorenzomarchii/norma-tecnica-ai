@@ -3,10 +3,34 @@
 from __future__ import annotations
 
 import json
+import logging
+
+import anthropic
 
 from config import settings
 from ingestion.embedder import get_single_embedding
 from retrieval import bm25_store, vector_store
+
+logger = logging.getLogger("norma-tecnica-ai")
+
+
+def _expand_query(query: str) -> list[str]:
+    """Use Claude to expand a broad query into specific sub-queries for better retrieval."""
+    try:
+        client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=300,
+            temperature=0,
+            system="Sei un ingegnere strutturista. Data una domanda, genera 3-5 sotto-query specifiche per cercare nelle NTC 2018 e nell'Eurocodice 2. Rispondi SOLO con le query, una per riga, senza numerazione o prefissi.",
+            messages=[{"role": "user", "content": query}],
+        )
+        sub_queries = [q.strip() for q in response.content[0].text.strip().split("\n") if q.strip()]
+        logger.info(f"[MULTI-QUERY] Expanded into {len(sub_queries)} sub-queries")
+        return sub_queries
+    except Exception as e:
+        logger.warning(f"[MULTI-QUERY] Failed: {e}")
+        return []
 
 
 def retrieve(
@@ -16,42 +40,45 @@ def retrieve(
 ) -> list[dict]:
     """Hybrid retrieval: vector + BM25 with RRF fusion + cross-ref expansion.
 
-    Args:
-        query: User query string.
-        document_filter: Optional filter by document name.
-        top_k: Number of final results.
-
-    Returns:
-        List of result dicts ordered by document then section, with keys:
-        section_number, section_title, document_name, text, page_numbers, score.
+    Uses multi-query expansion for broad/procedural questions.
     """
     top_k = top_k or settings.final_top_k
 
-    # 1. Vector search
-    query_embedding = get_single_embedding(query)
-    vector_results = vector_store.search(
-        query_embedding=query_embedding,
-        top_k=settings.vector_top_k,
-        document_filter=document_filter,
-    )
+    # Expand query into sub-queries for better coverage
+    all_queries = [query] + _expand_query(query)
 
-    # 2. BM25 search
-    bm25_results = bm25_store.search(
-        query=query,
-        top_k=settings.bm25_top_k,
-        document_filter=document_filter,
-    )
+    all_vector_results = []
+    all_bm25_results = []
 
-    # 3. Reciprocal Rank Fusion
-    fused = _reciprocal_rank_fusion(vector_results, bm25_results, k=60)
+    for q in all_queries:
+        # Vector search
+        query_embedding = get_single_embedding(q)
+        vr = vector_store.search(
+            query_embedding=query_embedding,
+            top_k=settings.vector_top_k,
+            document_filter=document_filter,
+        )
+        all_vector_results.extend(vr)
 
-    # 4. Take top results
-    top_results = fused[:top_k]
+        # BM25 search
+        br = bm25_store.search(
+            query=q,
+            top_k=settings.bm25_top_k,
+            document_filter=document_filter,
+        )
+        all_bm25_results.extend(br)
 
-    # 5. Cross-reference expansion
+    # Reciprocal Rank Fusion across all results
+    fused = _reciprocal_rank_fusion(all_vector_results, all_bm25_results, k=60)
+
+    # Take more results since we have broader coverage now
+    expanded_top_k = min(top_k + 4, len(fused))
+    top_results = fused[:expanded_top_k]
+
+    # Cross-reference expansion
     expanded = _expand_cross_references(top_results, document_filter)
 
-    # 6. Order by document name then section number for logical reading order
+    # Order by document name then section number for logical reading order
     expanded.sort(key=lambda r: (r["document_name"], _section_sort_key(r["section_number"])))
 
     return expanded

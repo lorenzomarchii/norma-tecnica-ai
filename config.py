@@ -21,14 +21,15 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     anthropic_model: str = "claude-sonnet-4-6"
 
-    # Embeddings (local model, no API needed)
-    embedding_model: str = "paraphrase-multilingual-MiniLM-L12-v2"
+    # Embeddings (via OpenRouter)
+    openrouter_api_key: str = ""
+    embedding_model: str = "openai/text-embedding-3-small"
 
     # Retrieval
-    vector_top_k: int = 10
-    bm25_top_k: int = 10
-    final_top_k: int = 8
-    max_cross_ref_expansion: int = 4
+    vector_top_k: int = 15
+    bm25_top_k: int = 15
+    final_top_k: int = 15
+    max_cross_ref_expansion: int = 6
 
     # ChromaDB
     chroma_persist_dir: str = str(DATA_DIR / "chroma_db")
@@ -44,6 +45,8 @@ class Settings(BaseSettings):
         # Fallback to Streamlit secrets if .env is not available
         if not self.anthropic_api_key:
             self.anthropic_api_key = _get_streamlit_secret("ANTHROPIC_API_KEY")
+        if not self.openrouter_api_key:
+            self.openrouter_api_key = _get_streamlit_secret("OPENROUTER_API_KEY")
 
 
 settings = Settings()
