@@ -1,0 +1,6 @@
+.env
+data/pdfs/
+data/chunks/
+__pycache__/
+*.pyc
+.streamlit/secrets.toml

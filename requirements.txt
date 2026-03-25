@@ -1,0 +1,10 @@
+streamlit>=1.30
+anthropic>=0.40
+sentence-transformers>=3.0
+pymupdf>=1.23
+pdfplumber>=0.10
+chromadb>=0.4.22
+rank-bm25>=0.2.2
+pydantic>=2.5
+pydantic-settings>=2.1
+python-dotenv>=1.0
