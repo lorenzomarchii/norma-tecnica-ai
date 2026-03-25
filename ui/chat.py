@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
+import logging
+from datetime import datetime
+
 import streamlit as st
+
+logger = logging.getLogger("norma-tecnica-ai")
+logging.basicConfig(level=logging.INFO)
 
 from generation.llm_client import generate_answer_stream
 from retrieval.hybrid_retriever import retrieve
@@ -24,6 +30,7 @@ def render_chat(document_filter: str | None = None) -> None:
 
     # Chat input
     if prompt := st.chat_input("Fai una domanda sulla normativa..."):
+        logger.info(f"[QUERY] {datetime.now().isoformat()} | {prompt}")
         # Add user message
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
